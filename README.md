@@ -1,343 +1,153 @@
-# Highlight Detector
+<div align="center">
 
-Automated highlight detection system for CS2 and Dota 2 gameplay videos using computer vision, OCR, and audio analysis.
+<img src="https://capsule-render.vercel.app/api?type=rect&color=0:0d1117,100:161b22&height=180&section=header&text=Highlight%20Detector&fontSize=40&fontColor=e6edf3&fontAlignY=42&desc=Automatic%20highlight%20clips%20from%20CS2%20and%20Dota%202%20gameplay&descSize=15&descColor=8b949e&descAlignY=64" width="100%"/>
 
-## Features
+**Upload a match recording, get the best moments back as ready-to-share clips.**
 
-- **Multi-game support**: CS2 and Dota 2
-- **Intelligent detection**: OCR killfeed parsing, audio intensity analysis, visual pattern recognition
-- **Smart scoring**: Context-aware scoring system (multi-kills, clutches, rampages, objectives)
-- **Top-K selection**: Automatically selects top 5 highlights with temporal spacing
-- **Async processing**: FastAPI + Celery for scalable video processing
-- **GPU acceleration**: EasyOCR with CUDA support for faster processing
+![Python](https://img.shields.io/badge/Python-161b22?style=for-the-badge&logo=python&logoColor=58a6ff)
+![FastAPI](https://img.shields.io/badge/FastAPI-161b22?style=for-the-badge&logo=fastapi&logoColor=58a6ff)
+![Celery](https://img.shields.io/badge/Celery-161b22?style=for-the-badge&logo=celery&logoColor=58a6ff)
+![OpenCV](https://img.shields.io/badge/OpenCV-161b22?style=for-the-badge&logo=opencv&logoColor=58a6ff)
+![PostgreSQL](https://img.shields.io/badge/PostgreSQL-161b22?style=for-the-badge&logo=postgresql&logoColor=58a6ff)
+![Redis](https://img.shields.io/badge/Redis-161b22?style=for-the-badge&logo=redis&logoColor=58a6ff)
+![Docker](https://img.shields.io/badge/Docker-161b22?style=for-the-badge&logo=docker&logoColor=58a6ff)
 
-## Architecture
+</div>
 
+---
+
+Highlight Detector is an asynchronous video-processing service for esports footage. A recording is uploaded over a REST API, a Celery worker scans it with OCR on the on-screen UI and with audio-energy analysis, scores the detected events with game-specific rules, and cuts the top moments into short clips with FFmpeg.
+
+It is a compact, working prototype of a full pipeline: API, queue, computer vision, signal processing, persistence and containerised deployment.
+
+## Highlights
+
+- **Two games, one pipeline.** CS2 (killfeed, top-right) and Dota 2 (event banner, top-center) share the detector and differ only in regions of interest and scoring rules.
+- **OCR on the game UI.** Each region is cropped, converted to grayscale, upscaled 3x, Otsu-thresholded and morphologically closed before EasyOCR reads it.
+- **Audio as a second signal.** Librosa loads the soundtrack; squared amplitude is smoothed over a 0.5 s window and peaks above mean + 2.5 sigma (at least 5 s apart) are flagged. Peaks with no OCR event within 3 s become `teamfight` events.
+- **Context-aware scoring and selection.** Per-game score tables, special-kill multipliers, then top-5 selection with minimum spacing (30 s for CS2, 60 s for Dota 2) so clips do not overlap.
+- **Async by design.** FastAPI accepts the upload and returns immediately; a Celery worker (Redis broker) processes it with up to 3 retries and writes status and results to PostgreSQL.
+- **One-command stack.** Docker Compose brings up API, worker, PostgreSQL 16 and Redis 7.
+
+## How it works
+
+```mermaid
+flowchart LR
+    C[Client] -->|POST /api/v1/upload| A[FastAPI]
+    A -->|save file, insert row| DB[(PostgreSQL)]
+    A -->|process_video.delay| R[(Redis)]
+    R --> W[Celery worker]
+    W --> D[GameDetector]
+    D --> O[OCR: killfeed or banner ROI]
+    D --> U[Audio: energy peaks]
+    O --> M[Merge events]
+    U --> M
+    M --> S[HighlightScorer]
+    S --> K[Top-K with min spacing]
+    K --> F[FFmpeg: 8 s clips]
+    F --> DB
+    C -->|GET /api/v1/status/id| A
 ```
-FastAPI (REST API)
-    ↓
-Celery Worker (Async processing)
-    ↓
-GameDetector → OCR + Audio + Visual
-    ↓
-HighlightScorer → Context-aware scoring
-    ↓
-Top-K Selection → Temporal NMS
-    ↓
-FFmpeg → Clip extraction
-```
 
-## Tech Stack
+| Component | File | Role |
+|---|---|---|
+| API | `app/api/endpoints.py`, `app/main.py` | `POST /api/v1/upload`, `GET /api/v1/status/{video_id}`; tables are created on startup |
+| Task | `app/tasks/video_tasks.py` | `process_video`: status transitions, detection, scoring, FFmpeg cutting, retry (max 3, 60 s countdown) |
+| Detector | `app/services/detector.py` | Reads every 5th frame with OpenCV, runs game-specific OCR, merges with audio peaks |
+| OCR | `app/services/ocr_engine.py` | ROI preprocessing and EasyOCR (English) |
+| Audio | `app/services/audio_analyzer.py` | Librosa load (22.05 kHz mono), intensity peak detection |
+| Scoring | `app/services/scorers.py` | `CS2Scorer`, `Dota2Scorer`, top-K selection |
+| Model | `app/models/video.py` | `Video` table: status, highlights (JSON), total events, processing time |
 
-- **Backend**: FastAPI, Celery, Redis
-- **Database**: PostgreSQL
-- **Computer Vision**: OpenCV, EasyOCR
-- **Audio**: Librosa
-- **Video**: FFmpeg
-- **Container**: Docker, Docker Compose
+Scoring as implemented:
 
-## Installation
+| Game | Rules |
+|---|---|
+| CS2 | kill 100, multi_kill 400, ace 1200, clutch 800; multipliers headshot 1.2, wallbang 1.5, noscope 1.8 |
+| Dota 2 | kill 100, teamfight 600, objective 800; banner text "triple kill" 500, "ultra kill" 900, "rampage" 1500 |
 
-### Prerequisites
+Clips start 5 s before the event and last 8 s (H.264 / AAC, `-preset fast`).
 
-- Docker & Docker Compose
-- NVIDIA GPU (optional, but recommended)
-- NVIDIA Container Toolkit (for GPU support)
+## Tech stack
 
-### Quick Start
+| Layer | Tools |
+|---|---|
+| API | FastAPI 0.109, Uvicorn, Pydantic Settings |
+| Queue | Celery 5.3, Redis 7 |
+| Storage | PostgreSQL 16, SQLAlchemy 2.0, psycopg2 |
+| Computer vision | OpenCV, EasyOCR 1.7 |
+| Audio | Librosa, SciPy, NumPy |
+| Video | FFmpeg |
+| Runtime | Python 3.11, Docker, Docker Compose |
+
+## Quick start
+
+Requires Docker and Docker Compose.
 
 ```bash
-# Clone repository
-git clone <repo-url>
+git clone https://github.com/Vladshmalii/highlight-detector.git
 cd highlight-detector
-
-# Start services
 docker-compose up --build
-
-# API available at http://localhost:8000
-# Docs at http://localhost:8000/docs
 ```
 
-### Manual Setup
+API on `http://localhost:8000`, interactive docs on `http://localhost:8000/docs`.
 
 ```bash
-# Install system dependencies
-apt-get update && apt-get install -y \
-    ffmpeg \
-    tesseract-ocr \
-    libtesseract-dev \
-    libsm6 libxext6 libxrender-dev libgomp1
+curl -X POST "http://localhost:8000/api/v1/upload" -F "file=@gameplay.mp4" -F "game_type=cs2"
+# {"video_id": 1, "game_type": "cs2", "status": "pending"}
 
-# Install Python dependencies
-pip install -r requirements.txt
-
-# Start Redis
-redis-server
-
-# Start PostgreSQL
-# Configure DATABASE_URL in .env
-
-# Run migrations
-alembic upgrade head
-
-# Start API
-uvicorn app.main:app --host 0.0.0.0 --port 8000
-
-# Start worker
-celery -A app.core.celery_app worker --loglevel=info
-```
-
-## Usage
-
-### Upload Video
-
-```bash
-curl -X POST "http://localhost:8000/api/v1/upload" \
-  -F "file=@gameplay.mp4" \
-  -F "game_type=cs2"
-```
-
-Response:
-```json
-{
-  "video_id": 1,
-  "game_type": "cs2",
-  "status": "pending"
-}
-```
-
-### Check Status
-
-```bash
 curl "http://localhost:8000/api/v1/status/1"
+# status: pending | processing | completed | failed
+# on completion: highlights[] (timestamp, score, type, filename, path), total_events, processing_time
 ```
 
-Response:
-```json
-{
-  "video_id": 1,
-  "game_type": "cs2",
-  "status": "completed",
-  "highlights": [
-    {
-      "timestamp": 145.2,
-      "score": 1200,
-      "type": "ace",
-      "filename": "highlight_1.mp4"
-    }
-  ],
-  "total_events": 47,
-  "processing_time": 892.3
-}
-```
+`game_type` accepts `cs2` (default) or `dota2`. Clips are written to `videos/highlights_<video_id>/highlight_<n>.mp4` (mounted from `./videos`).
 
-## Game-Specific Detection
-
-### Counter-Strike 2
-
-**Detection Methods:**
-- OCR killfeed parsing (top-right corner)
-- Template matching for UI icons
-- Special kill detection (headshot, wallbang, noscope)
-
-**Scoring:**
-- Kill: 100 points
-- Multi-kill: 400 points
-- Ace: 1200 points
-- Clutch: 800 points
-- Multipliers: headshot (1.2x), wallbang (1.5x), noscope (1.8x)
-
-**Highlight Selection:**
-- Minimum 30s spacing between clips
-- 5s pre-event buffer, 3s post-event buffer
-
-### Dota 2
-
-**Detection Methods:**
-- Event banner OCR (top-center)
-- Audio intensity peak detection
-- Killfeed parsing
-
-**Scoring:**
-- Kill: 100 points
-- Triple Kill: 500 points
-- Ultra Kill: 900 points
-- Rampage: 1500 points
-- Teamfight: 600 points
-
-**Highlight Selection:**
-- Minimum 60s spacing between clips
-- 5s pre-event buffer, 3s post-event buffer
-
-## Performance
-
-### Processing Time
-
-| Hardware | 30 min video | 60 min video |
-|----------|-------------|--------------|
-| CPU only | 60-90 min | 120-180 min |
-| GPU (NVIDIA) | 15-30 min | 30-60 min |
-
-### Optimization
-
-**Frame Sampling:**
-- Default: Every 5th frame (~6 FPS processing)
-- Adjustable via `frame_skip` parameter
-
-**GPU Acceleration:**
-- EasyOCR with CUDA
-- Automatic CPU fallback if GPU unavailable
+Without Docker: install FFmpeg and `requirements.txt`, run PostgreSQL and Redis, set `DATABASE_URL` and `REDIS_URL`, then start `uvicorn app.main:app` and `celery -A app.core.celery_app worker --loglevel=info`.
 
 ## Configuration
 
-### Environment Variables
+Read by `app/core/config.py` from the environment or a `.env` file.
 
-```env
-DATABASE_URL=postgresql://user:pass@localhost:5432/highlights
-REDIS_URL=redis://localhost:6379/0
-VIDEO_UPLOAD_DIR=/app/videos
-```
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | `postgresql://user:pass@localhost:5432/highlights` | SQLAlchemy connection string |
+| `REDIS_URL` | `redis://localhost:6379/0` | Celery broker and result backend |
+| `VIDEO_UPLOAD_DIR` | `/app/videos` | Uploads and generated clips |
+| `HOST`, `PORT`, `LOG_LEVEL` | `0.0.0.0`, `8000`, `info` | Read by `entrypoint.sh` for the API server |
 
-### Game Type
+The `user:pass` values are local development defaults from `docker-compose.yml`; change them for any real deployment.
 
-Supported values:
-- `cs2` - Counter-Strike 2
-- `dota2` - Dota 2
-
-## API Reference
-
-### Endpoints
-
-#### POST /api/v1/upload
-Upload video for processing
-
-**Parameters:**
-- `file` (multipart/form-data): Video file
-- `game_type` (string): Game type (cs2, dota2)
-
-**Response:**
-```json
-{
-  "video_id": 1,
-  "game_type": "cs2",
-  "status": "pending"
-}
-```
-
-#### GET /api/v1/status/{video_id}
-Get processing status and results
-
-**Response:**
-```json
-{
-  "video_id": 1,
-  "game_type": "cs2",
-  "status": "completed",
-  "highlights": [...],
-  "total_events": 47,
-  "processing_time": 892.3,
-  "created_at": "2025-10-14T12:00:00",
-  "processed_at": "2025-10-14T12:15:00"
-}
-```
-
-## Project Structure
+## Project structure
 
 ```
-.
-├── app/
-│   ├── api/
-│   │   └── endpoints.py          # FastAPI routes
-│   ├── core/
-│   │   ├── celery_app.py         # Celery configuration
-│   │   ├── config.py             # Settings
-│   │   └── enum.py               # Enums (VideoStatus, GameType)
-│   ├── models/
-│   │   └── video.py              # SQLAlchemy models
-│   ├── services/
-│   │   ├── detector.py           # Main detection logic
-│   │   ├── ocr_engine.py         # OCR processing
-│   │   ├── audio_analyzer.py    # Audio analysis
-│   │   └── scorers.py            # Scoring system
-│   ├── tasks/
-│   │   └── video_tasks.py        # Celery tasks
-│   └── main.py                   # FastAPI application
-├── docker-compose.yml
-├── Dockerfile
-├── entrypoint.sh
-├── requirements.txt
-└── README.md
+app/
+  api/endpoints.py        upload + status routes
+  core/                   config, Celery app, enums
+  models/video.py         SQLAlchemy model
+  services/               detector, ocr_engine, audio_analyzer, scorers
+  tasks/video_tasks.py    process_video Celery task
+  main.py                 FastAPI app
+alembic/env.py            Alembic environment (no ini or versions yet)
+Dockerfile  docker-compose.yml  entrypoint.sh  requirements.txt
 ```
 
-## Development
+## Testing
 
-### Running Tests
+There is no test suite in the repository yet.
 
-```bash
-pytest tests/
-```
+## Status and roadmap
 
-### Code Quality
+Working prototype. Known limits, stated plainly:
 
-```bash
-# Format
-black app/
+- Detection is keyword matching on OCR text. CS2 emits `kill` events with `headshot` / `wallbang` tags; `ace`, `clutch` and `noscope` have score entries but no detector produces them yet.
+- OCR regions are fixed fractions of the frame, so results depend on resolution and HUD layout; English only.
+- `frame_skip` (5) is a constant in `detector.py`, not a setting. EasyOCR is created with `gpu=True`; the Compose file does not configure GPU access.
+- No accuracy or throughput benchmarks have been measured.
+- Schema is created with `create_all`; Alembic migrations are not set up. No authentication or upload size limits.
 
-# Lint
-flake8 app/
-
-# Type check
-mypy app/
-```
-
-## Troubleshooting
-
-### GPU not detected
-
-```bash
-# Check CUDA availability
-python -c "import torch; print(torch.cuda.is_available())"
-
-# Install NVIDIA Container Toolkit
-# https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
-```
-
-### Slow processing
-
-- Increase `frame_skip` in `detector.py` (trade accuracy for speed)
-- Use GPU acceleration
-- Reduce video resolution before upload
-
-### OCR accuracy issues
-
-- Check video quality (minimum 720p recommended)
-- Adjust preprocessing parameters in `ocr_engine.py`
-- Verify game UI language matches OCR language setting
-
-## Roadmap
-
-- [ ] Multi-language support
-- [ ] Real-time streaming detection
-- [ ] Custom scoring profiles
-- [ ] Web UI for video management
-- [ ] Batch processing
-- [ ] Cloud storage integration (S3, GCS)
-
-## License
-
-MIT
+Roadmap: richer event detection (multi-kill, clutch, ace), configurable frame sampling and ROIs, tests, migrations, web UI, cloud storage.
 
 ## Credits
 
-Built with inspiration from:
-- [Flowtter/crispy](https://github.com/Flowtter/crispy)
-- [colinsenner/csgo-ml-cv](https://github.com/colinsenner/csgo-ml-cv)
-
-
-## Contributing
-
-Pull requests welcome. For major changes, open an issue first.
-
-## Support
-
-For issues and questions, open a GitHub issue.
+Inspired by [Flowtter/crispy](https://github.com/Flowtter/crispy) and [colinsenner/csgo-ml-cv](https://github.com/colinsenner/csgo-ml-cv).
