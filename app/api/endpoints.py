@@ -4,6 +4,7 @@ from app.models.video import Video
 from app.tasks.video_tasks import process_video
 from app.core.config import settings
 from app.core.enum import GameType
+from app.core.paths import new_upload_name, resolve_in_dir
 import shutil
 import os
 
@@ -28,13 +29,17 @@ async def upload_video(
         game_type: GameType = GameType.CS2,
         db: Session = Depends(get_db)
 ):
-    file_path = os.path.join(settings.VIDEO_UPLOAD_DIR, file.filename)
+    try:
+        stored_name = new_upload_name(file.filename)
+        file_path = resolve_in_dir(settings.VIDEO_UPLOAD_DIR, stored_name)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     os.makedirs(settings.VIDEO_UPLOAD_DIR, exist_ok=True)
 
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(file.file, buffer)
 
-    video = Video(filename=file.filename, game_type=game_type, status="pending")
+    video = Video(filename=stored_name, game_type=game_type, status="pending")
     db.add(video)
     db.commit()
     db.refresh(video)

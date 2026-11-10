@@ -6,6 +6,7 @@ from app.core.enum import VideoStatus
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from app.core.config import settings
+from app.core.paths import resolve_in_dir
 from datetime import datetime
 import os
 import logging
@@ -32,7 +33,7 @@ def process_video(self, video_id: int):
         video.status = VideoStatus.PROCESSING
         db.commit()
 
-        video_path = os.path.join(settings.VIDEO_UPLOAD_DIR, video.filename)
+        video_path = resolve_in_dir(settings.VIDEO_UPLOAD_DIR, video.filename)
 
         detector = GameDetector(video.game_type)
         all_events = detector.detect_all(video_path)
