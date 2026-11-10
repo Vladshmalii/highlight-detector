@@ -5,7 +5,6 @@ from app.tasks.video_tasks import process_video
 from app.core.config import settings
 from app.core.enum import GameType
 from app.core.paths import new_upload_name, resolve_in_dir
-import shutil
 import os
 
 router = APIRouter()
@@ -36,8 +35,16 @@ async def upload_video(
         raise HTTPException(status_code=400, detail=str(e))
     os.makedirs(settings.VIDEO_UPLOAD_DIR, exist_ok=True)
 
+    max_bytes = settings.MAX_UPLOAD_MB * 1024 * 1024
+    size = 0
     with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > max_bytes:
+                buffer.close()
+                os.remove(file_path)
+                raise HTTPException(status_code=413, detail=f"File exceeds {settings.MAX_UPLOAD_MB} MB")
+            buffer.write(chunk)
 
     video = Video(filename=stored_name, game_type=game_type, status="pending")
     db.add(video)

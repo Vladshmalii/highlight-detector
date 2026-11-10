@@ -134,7 +134,7 @@ Dockerfile  docker-compose.yml  entrypoint.sh  requirements.txt
 
 ## Testing
 
-There is no test suite in the repository yet.
+Unit tests cover upload path sanitising (`tests/test_paths.py`); run `python -m pytest tests`. Detection and the pipeline have no tests yet.
 
 ## Status and roadmap
 
@@ -144,7 +144,7 @@ Working prototype. Known limits, stated plainly:
 - OCR regions are fixed fractions of the frame, so results depend on resolution and HUD layout; English only.
 - `frame_skip` (5) is a constant in `detector.py`, not a setting. EasyOCR is created with `gpu=True`; the Compose file does not configure GPU access.
 - No accuracy or throughput benchmarks have been measured.
-- Schema is created with `create_all`; Alembic migrations are not set up. No authentication or upload size limits.
+- Schema is created with `create_all`; Alembic migrations are not set up. No authentication (uploads are limited by extension and `MAX_UPLOAD_MB`, default 2048).
 
 Roadmap: richer event detection (multi-kill, clutch, ace), configurable frame sampling and ROIs, tests, migrations, web UI, cloud storage.
 
